@@ -1,14 +1,14 @@
-from .insurance import Insurance
-from .person import *
-from .medical_history import *
+from insurance import Insurance
+from person import *
+from medical_history import *
 
 class Patient(Person):
     def __init__(self, name, DOB, gender, contact_info: ContactInfo,
                  blood_group: str, insurance: Insurance, medical_history: IMedicalHistory):
         super().__init__(name, DOB, gender, contact_info)
-        self.blood_group = blood_group
-        self.insurance = insurance
-        self.medical_history = medical_history
+        self._blood_group = blood_group
+        self._insurance = insurance
+        self._medical_history = medical_history
 
     @property
     def blood_group(self):
@@ -40,11 +40,19 @@ class Patient(Person):
         if not isinstance(history, IMedicalHistory):
             raise TypeError("Medical history must implement IMedicalHistory")
         self._medical_history = history
-
     def get_details(self):
-        return (
-            f"Patient: {self.name}, Age: {self.age}, Gender: {self.gender}, "
-            f"Email: {self.contact_info.email}, Phone: {self.contact_info.phone}, "
-            f"Address: {self.contact_info.address}, Blood Group: {self.blood_group}, "
-            f"Insurance: {self.insurance.coverage_level}"
-        )
+        return {
+            "name": self._name,
+            "dob": self._DOB,
+            "gender": self._gender,
+            "email": self.contact_info.email,
+            "phone": self.contact_info.phone,
+            "address": self.contact_info.address,
+            "blood_group": self._blood_group,
+            "insurance_type": str(self._insurance.coverage_level),
+            "medications": [m.__dict__ for m in self._medical_history.current_medications],
+            "allergies": [a.__dict__ for a in self._medical_history.allergies],
+            "conditions": [c.__dict__ for c in self._medical_history.chronic_conditions],
+            "surgeries": [s.__dict__ for s in self._medical_history.past_surgeries],
+        }
+
