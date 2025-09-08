@@ -1,6 +1,6 @@
-from pymongo import MongoClient, ASCENDING
+from motor.motor_asyncio import AsyncIOMotorClient
 
-client = MongoClient("mongodb://localhost:27017")
+client = AsyncIOMotorClient("mongodb://localhost:27017")
 db = client["hospital"]
 
 collections = {
@@ -11,13 +11,11 @@ collections = {
     "condition": db["conditions"],
     "condition_diagnosis": db["condition_diagnoses"],
     "surgery": db["surgeries"],
-    "past_surgeries": db["past_surgeries"],
+    "past_surgery": db["past_surgeries"],
     "medical_history": db["medical_histories"],
     "insurance": db["insurances"],
     "contact_details": db["contact_details"],
-    "person": db["persons"],
     "doctor": db["doctors"],
     "admin": db["admins"],
     "patient": db["patients"],
-    "patient_insurance": db["patient_insurances"],
 }
