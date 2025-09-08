@@ -35,18 +35,16 @@ def to_mongo_dict(obj: dict) -> dict:
 
 
 def serialize_doc(doc: dict) -> dict:
-    """Convert MongoDB document to JSON-serializable dict"""
     if not doc:
         return None
     doc = dict(doc)
-    if "_id" in doc:  # only convert if raw MongoDB doc
+    if "_id" in doc:
         doc["id"] = str(doc["_id"])
         del doc["_id"]
     return doc
 
 
 def serialize_data(data):
-    """Ensure everything returned is JSON-safe"""
     if isinstance(data, list):
         return [serialize_doc(d) for d in data]
     if isinstance(data, dict):
