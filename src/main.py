@@ -1,22 +1,32 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.routing import APIRouter
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from bson import ObjectId
-from schema import APIResponse
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import date, datetime, timedelta
+from typing import Optional
+from schema import APIResponse, Admin
 from registry import registry
-from datetime import date, datetime
+import os
 
-app = FastAPI(title="Medical System API")
+app = FastAPI(title="Medical System API with JWT Auth")
 router = APIRouter()
 
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 1
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 
 def validate_id(id: str) -> ObjectId:
     if not ObjectId.is_valid(id):
         raise HTTPException(status_code=400, detail="Invalid ObjectId format")
     return ObjectId(id)
 
-
 def to_mongo_dict(obj: dict) -> dict:
-    """Convert any date/datetime in the dict into ISO strings before saving"""
     new_obj = {}
     for k, v in obj.items():
         if isinstance(v, (date, datetime)):
@@ -53,11 +63,64 @@ def serialize_data(data):
         return str(data)
     return data
 
+def verify_password(plain, hashed):
+    return pwd_context.verify(plain, hashed)
+
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+async def get_current_admin(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        admin_id: str = payload.get("sub")
+        role: str = payload.get("role")
+        if admin_id is None or role != "Admin":
+            raise HTTPException(status_code=403, detail="Not authorized")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    admin_collection = registry["admin"]["collection"]
+    admin = await admin_collection.find_one({"_id": ObjectId(admin_id)})
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin not found")
+
+    return serialize_doc(admin)
+
+@router.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    admin_collection = registry["admin"]["collection"]
+
+    admin = await admin_collection.find_one({"username": form_data.username})
+    if not admin:
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+
+    if not verify_password(form_data.password, admin["password"]):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": str(admin["_id"]), "role": "Admin"},
+        expires_delta=access_token_expires,
+    )
+
+    return {"access_token": access_token, "token_type": "bearer"}
 
 @router.post("/{entity}")
 async def create_entity(entity: str, payload: dict):
     if entity not in registry:
         raise HTTPException(status_code=404, detail="Entity not found")
+
+    if "password" in payload:
+        payload["password"] = get_password_hash(payload["password"])
 
     model = registry[entity]["model"]
     collection = registry[entity]["collection"]
@@ -72,6 +135,7 @@ async def create_entity(entity: str, payload: dict):
         message=f"{entity} created",
         data=serialize_data(new_doc),
     )
+
 
 
 @router.get("/{entity}/{id}")
@@ -93,6 +157,8 @@ async def get_entity(entity: str, id: str):
 
 @router.get("/{entity}")
 async def list_entities(entity: str):
+    if entity == "doctor" or entity == "patient":
+        raise HTTPException(status_code=400, detail="Private Information only admin can access")
     if entity not in registry:
         raise HTTPException(status_code=404, detail="Entity not found")
 
@@ -146,7 +212,6 @@ async def delete_entity(entity: str, id: str):
         message=f"{entity} deleted",
         data={"id": id},
     )
-
 
 @router.get("/patient/{id}/details")
 async def get_patient_details(id: str):
@@ -205,5 +270,21 @@ async def get_patient_details(id: str):
         data=response,
     )
 
+@router.get("/admin/{id}/doctors")
+async def list_all_doctors(current_admin=Depends(get_current_admin)):
+    doctor_collection = registry["doctor"]["collection"]
+    doctors = []
+    async for doc in doctor_collection.find():
+        doctors.append(serialize_doc(doc))
+    return APIResponse(code=200, message="List of doctors", data=doctors)
 
-app.include_router(router, prefix="/api", tags=["CRUD"])
+
+@router.get("/admin/{id}/patients")
+async def list_all_patients(current_admin=Depends(get_current_admin)):
+    patient_collection = registry["patient"]["collection"]
+    patients = []
+    async for doc in patient_collection.find():
+        patients.append(serialize_doc(doc))
+    return APIResponse(code=200, message="List of patients", data=patients)
+
+app.include_router(router, prefix="/api", tags=["CRUD & Auth"])
