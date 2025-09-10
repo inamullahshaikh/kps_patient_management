@@ -4,6 +4,7 @@ client = AsyncIOMotorClient("mongodb://localhost:27017")
 db = client["hospital"]
 
 collections = {
+    "persons": db["persons"],     
     "medicine": db["medicines"],
     "medication": db["medications"],
     "allergy": db["allergies"],
@@ -14,8 +15,4 @@ collections = {
     "past_surgery": db["past_surgeries"],
     "medical_history": db["medical_histories"],
     "insurance": db["insurances"],
-    "contact_details": db["contact_details"],
-    "doctor": db["doctors"],
-    "admin": db["admins"],
-    "patient": db["patients"],
 }

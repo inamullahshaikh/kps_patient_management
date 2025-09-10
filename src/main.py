@@ -1,290 +1,573 @@
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.routing import APIRouter
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from bson import ObjectId
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from datetime import date, datetime, timedelta
-from typing import Optional
-from schema import APIResponse, Admin
-from registry import registry
-import os
+from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.security import OAuth2PasswordRequestForm
+from auth import (
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+    hash_password,
+)
+import uuid
+from schema import *
+from database import collections
+from fastapi import Body
+from datetime import datetime
+app = FastAPI(title="Hospital Management API")
 
-app = FastAPI(title="Medical System API with JWT Auth")
-router = APIRouter()
-
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 1
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
-
-def validate_id(id: str) -> ObjectId:
-    if not ObjectId.is_valid(id):
-        raise HTTPException(status_code=400, detail="Invalid ObjectId format")
-    return ObjectId(id)
-
-def to_mongo_dict(obj: dict) -> dict:
-    new_obj = {}
-    for k, v in obj.items():
-        if isinstance(v, (date, datetime)):
-            new_obj[k] = v.isoformat()
-        elif isinstance(v, dict):
-            new_obj[k] = to_mongo_dict(v)
-        elif isinstance(v, list):
-            new_obj[k] = [
-                to_mongo_dict(x) if isinstance(x, dict)
-                else (x.isoformat() if isinstance(x, (date, datetime)) else x)
-                for x in v
-            ]
+@app.post("/signup")
+async def signup(
+    new_user: Person,
+    current_user: Optional[Person] = Depends(get_current_user)
+):
+    if new_user.role == RoleEnum.PATIENT:
+        if current_user is None:
+            pass  
+        elif current_user.role in [RoleEnum.RECEPTIONIST, RoleEnum.PATIENT]:
+            pass  
         else:
-            new_obj[k] = v
-    return new_obj
+            raise HTTPException(status_code=403, detail="Not authorized to create patient profiles")
 
+        existing = await collections["persons"].find_one({"username": new_user.username})
+        if existing:
+            raise HTTPException(status_code=400, detail="Username already exists")
 
-def serialize_doc(doc: dict) -> dict:
-    if not doc:
-        return None
-    doc = dict(doc)
-    if "_id" in doc:
-        doc["id"] = str(doc["_id"])
-        del doc["_id"]
-    return doc
+        patient_uuid = str(uuid.uuid4())
 
+        user_dict = new_user.dict(by_alias=True)
+        user_dict["uuid"] = patient_uuid
+        user_dict["password"] = hash_password(new_user.password)
 
-def serialize_data(data):
-    if isinstance(data, list):
-        return [serialize_doc(d) for d in data]
-    if isinstance(data, dict):
-        return serialize_doc(data)
-    if isinstance(data, ObjectId):
-        return str(data)
-    return data
+        await collections["persons"].insert_one(user_dict)
 
-def verify_password(plain, hashed):
-    return pwd_context.verify(plain, hashed)
+        medical_history = MedicalHistory(patient_id=patient_uuid)
+        await collections["medical_history"].insert_one(medical_history.dict(by_alias=True))
 
+        return {"message": "Patient profile created successfully", "uuid": patient_uuid}
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
+    if not current_user or current_user.role != RoleEnum.ADMIN:
+        print(current_user.role)
+        print(RoleEnum.ADMIN)
+        raise HTTPException(status_code=403, detail="Only admin can create this type of user")
 
+    existing = await collections["persons"].find_one({"username": new_user.username})
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already exists")
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    user_uuid = str(uuid.uuid4())
 
+    user_dict = new_user.dict(by_alias=True)
+    user_dict["uuid"] = user_uuid
+    user_dict["password"] = hash_password(new_user.password)
 
-async def get_current_admin(token: str = Depends(oauth2_scheme)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        admin_id: str = payload.get("sub")
-        role: str = payload.get("role")
-        if admin_id is None or role != "Admin":
-            raise HTTPException(status_code=403, detail="Not authorized")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    await collections["persons"].insert_one(user_dict)
+    return {"message": f"{new_user.role.value} profile created successfully", "uuid": user_uuid}
 
-    admin_collection = registry["admin"]["collection"]
-    admin = await admin_collection.find_one({"_id": ObjectId(admin_id)})
-    if not admin:
-        raise HTTPException(status_code=404, detail="Admin not found")
-
-    return serialize_doc(admin)
-
-@router.post("/login")
+@app.post("/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    admin_collection = registry["admin"]["collection"]
+    user = await authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    admin = await admin_collection.find_one({"username": form_data.username})
-    if not admin:
-        raise HTTPException(status_code=400, detail="Invalid username or password")
-
-    if not verify_password(form_data.password, admin["password"]):
-        raise HTTPException(status_code=400, detail="Invalid username or password")
-
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": str(admin["_id"]), "role": "Admin"},
-        expires_delta=access_token_expires,
+        data={
+            "sub": user.username,
+            "role": user.role,
+            "uuid": user.uuid
+        }
     )
-
-    return {"access_token": access_token, "token_type": "bearer"}
-
-@router.post("/{entity}")
-async def create_entity(entity: str, payload: dict):
-    if entity not in registry:
-        raise HTTPException(status_code=404, detail="Entity not found")
-
-    if "password" in payload:
-        payload["password"] = get_password_hash(payload["password"])
-
-    model = registry[entity]["model"]
-    collection = registry[entity]["collection"]
-
-    obj = model(**payload)
-    mongo_doc = to_mongo_dict(obj.dict(by_alias=True))
-    result = await collection.insert_one(mongo_doc)
-    new_doc = await collection.find_one({"_id": result.inserted_id})
-
-    return APIResponse(
-        code=201,
-        message=f"{entity} created",
-        data=serialize_data(new_doc),
-    )
-
-
-
-@router.get("/{entity}/{id}")
-async def get_entity(entity: str, id: str):
-    if entity not in registry:
-        raise HTTPException(status_code=404, detail="Entity not found")
-
-    collection = registry[entity]["collection"]
-    obj = await collection.find_one({"_id": validate_id(id)})
-    if not obj:
-        raise HTTPException(status_code=404, detail=f"{entity} not found")
-
-    return APIResponse(
-        code=200,
-        message=f"{entity} retrieved",
-        data=serialize_data(obj),
-    )
-
-
-@router.get("/{entity}")
-async def list_entities(entity: str):
-    if entity == "doctor" or entity == "patient":
-        raise HTTPException(status_code=400, detail="Private Information only admin can access")
-    if entity not in registry:
-        raise HTTPException(status_code=404, detail="Entity not found")
-
-    collection = registry[entity]["collection"]
-    results = []
-    async for doc in collection.find():
-        results.append(serialize_doc(doc))
-
-    return APIResponse(
-        code=200,
-        message=f"{entity} list",
-        data=serialize_data(results),
-    )
-
-
-@router.put("/{entity}/{id}")
-async def update_entity(entity: str, id: str, payload: dict):
-    if entity not in registry:
-        raise HTTPException(status_code=404, detail="Entity not found")
-
-    collection = registry[entity]["collection"]
-    payload = to_mongo_dict(payload)
-    update_result = await collection.update_one(
-        {"_id": validate_id(id)}, {"$set": payload}
-    )
-
-    if update_result.matched_count == 0:
-        raise HTTPException(status_code=404, detail=f"{entity} not found")
-
-    updated_doc = await collection.find_one({"_id": validate_id(id)})
-    return APIResponse(
-        code=200,
-        message=f"{entity} updated",
-        data=serialize_data(updated_doc),
-    )
-
-
-@router.delete("/{entity}/{id}")
-async def delete_entity(entity: str, id: str):
-    if entity not in registry:
-        raise HTTPException(status_code=404, detail="Entity not found")
-
-    collection = registry[entity]["collection"]
-    delete_result = await collection.delete_one({"_id": validate_id(id)})
-
-    if delete_result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail=f"{entity} not found")
-
-    return APIResponse(
-        code=200,
-        message=f"{entity} deleted",
-        data={"id": id},
-    )
-
-@router.get("/patient/{id}/details")
-async def get_patient_details(id: str):
-    patient_collection = registry["patient"]["collection"]
-    insurance_collection = registry["insurance"]["collection"]
-    history_collection = registry["medical_history"]["collection"]
-    allergy_collection = registry["allergy_diagnosis"]["collection"]
-    condition_collection = registry["condition_diagnosis"]["collection"]
-    surgery_collection = registry["past_surgery"]["collection"]
-    medication_collection = registry["medication"]["collection"]
-
-    patient = await patient_collection.find_one({"_id": validate_id(id)})
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    insurances = []
-    async for ins in insurance_collection.find({"patient_id": validate_id(id)}):
-        insurances.append(serialize_doc(ins))
-
-    histories = []
-    async for hist in history_collection.find({"patient_id": validate_id(id)}):
-        hist_doc = serialize_doc(hist)
-
-        allergies = []
-        async for a in allergy_collection.find({"medical_history_id": hist["_id"]}):
-            allergies.append(serialize_doc(a))
-
-        conditions = []
-        async for c in condition_collection.find({"medical_history_id": hist["_id"]}):
-            conditions.append(serialize_doc(c))
-
-        surgeries = []
-        async for s in surgery_collection.find({"medical_history_id": hist["_id"]}):
-            surgeries.append(serialize_doc(s))
-
-        medications = []
-        async for m in medication_collection.find({"medical_history_id": hist["_id"]}):
-            medications.append(serialize_doc(m))
-
-        hist_doc["allergies"] = allergies
-        hist_doc["conditions"] = conditions
-        hist_doc["surgeries"] = surgeries
-        hist_doc["medications"] = medications
-
-        histories.append(hist_doc)
-
-    response = {
-        "patient": serialize_doc(patient),
-        "insurances": insurances,
-        "medical_history": histories,
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user.role,
+        "uuid": user.uuid
     }
 
-    return APIResponse(
+
+@app.get("/patients", response_model=APIResponse[List[Person]])
+async def list_patients(current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    patients_cursor = collections["persons"].find({"role": RoleEnum.PATIENT})
+    patients: List[Person] = []
+    async for doc in patients_cursor:
+        patients.append(Person(**doc)) 
+
+    return APIResponse[List[Person]](
         code=200,
-        message="Patient details with insurance and medical history retrieved",
-        data=response,
+        message="Patients retrieved successfully",
+        data=patients
     )
 
-@router.get("/admin/{id}/doctors")
-async def list_all_doctors(current_admin=Depends(get_current_admin)):
-    doctor_collection = registry["doctor"]["collection"]
-    doctors = []
-    async for doc in doctor_collection.find():
-        doctors.append(serialize_doc(doc))
-    return APIResponse(code=200, message="List of doctors", data=doctors)
+
+@app.get("/patients/{uuid}", response_model=APIResponse[dict])
+async def get_patient_full(
+    uuid: str,
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role == RoleEnum.PATIENT:
+        if current_user.uuid != uuid: 
+            raise HTTPException(status_code=403, detail="Not authorized to view other patients")
+    elif current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    patient_doc = await collections["persons"].find_one({"uuid": uuid, "role": RoleEnum.PATIENT})
+    if not patient_doc:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    patient = Person(**patient_doc)
+
+    medical_history_doc = await collections["medical_history"].find_one({"patient_id": uuid})
+    if not medical_history_doc:
+        medical_history_data = {}
+    else:
+        medical_history_id = medical_history_doc["uuid"]
+
+        # Fetch all related data
+        medications_cursor = collections["medication"].find({"medical_history_id": medical_history_id})
+        medications = [Medication(**m) async for m in medications_cursor]
+
+        surgeries_cursor = collections["past_surgery"].find({"medical_history_id": medical_history_id})
+        past_surgeries = [PastSurgery(**s) async for s in surgeries_cursor]
+
+        conditions_cursor = collections["condition_diagnosis"].find({"medical_history_id": medical_history_id})
+        condition_diagnoses = [ConditionDiagnosis(**c) async for c in conditions_cursor]
+
+        allergies_cursor = collections["allergy_diagnosis"].find({"medical_history_id": medical_history_id})
+        allergy_diagnoses = [AllergyDiagnosis(**a) async for a in allergies_cursor]
+
+        # Assemble medical history
+        medical_history_data = {
+            "uuid": medical_history_id,
+            "medications": medications,
+            "past_surgeries": past_surgeries,
+            "condition_diagnoses": condition_diagnoses,
+            "allergy_diagnoses": allergy_diagnoses
+        }
+
+    # Combine patient info + medical history
+    result = patient.dict()
+    result["medical_history"] = medical_history_data
+
+    return APIResponse[dict](
+        code=200,
+        message="Patient with medical history retrieved successfully",
+        data=result
+    )
 
 
-@router.get("/admin/{id}/patients")
-async def list_all_patients(current_admin=Depends(get_current_admin)):
-    patient_collection = registry["patient"]["collection"]
-    patients = []
-    async for doc in patient_collection.find():
-        patients.append(serialize_doc(doc))
-    return APIResponse(code=200, message="List of patients", data=patients)
 
-app.include_router(router, prefix="/api", tags=["CRUD & Auth"])
+@app.get("/doctors", response_model=APIResponse[List[Person]])
+async def list_doctors(current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.RECEPTIONIST, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doctors_cursor = collections["persons"].find({"role": RoleEnum.DOCTOR})
+    doctors: List[Person] = []
+    async for doc in doctors_cursor:
+        if current_user.role == RoleEnum.RECEPTIONIST:
+            doc["password"] = "**************"
+        doctors.append(Person(**doc))
+
+    return APIResponse[List[Person]](
+        code=200,
+        message="Doctors retrieved successfully",
+        data=doctors
+    )
+
+@app.get("/doctors/{uuid}", response_model=APIResponse[Person])
+async def get_doctor(
+    uuid: str,
+    current_user: Person = Depends(get_current_user)
+):
+    doctor_doc = await collections["persons"].find_one(
+        {"uuid": uuid, "role": RoleEnum.DOCTOR}
+    )
+    if not doctor_doc:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+    if current_user.role == RoleEnum.DOCTOR and current_user.uuid != uuid:
+        raise HTTPException(status_code=403, detail="Doctors can only view their own profile")
+    doctor = Person(**doctor_doc)
+    if current_user.role in [RoleEnum.RECEPTIONIST, RoleEnum.PATIENT]:
+        doctor.password = None  
+    return APIResponse[Person](
+        code=200,
+        message="Doctor retrieved successfully",
+        data=doctor
+    )
+
+@app.get("/receptionist/receive-patient", response_model=APIResponse[Person])
+async def receive_patient(
+    username: Optional[str] = Query(None),
+    uuid: Optional[str] = Query(None),
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role not in [RoleEnum.RECEPTIONIST]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if not username and not uuid:
+        raise HTTPException(status_code=400, detail="Provide either username or uuid")
+
+    query = {"role": RoleEnum.PATIENT}
+    if username:
+        query["username"] = username
+    if uuid:
+        query["uuid"] = uuid
+
+    patient_doc = await collections["persons"].find_one(query)
+    if not patient_doc:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    patient_doc["password"] = None  
+
+    patient = Person(**patient_doc)
+
+    return APIResponse[Person](
+        code=200,
+        message="Patient details retrieved successfully",
+        data=patient
+    )
+
+@app.post("/allergy", response_model=APIResponse[Allergy])
+async def create_allergy(
+    allergy_data: Allergy,
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can create allergies")
+
+    result = await collections["allergy"].insert_one(allergy_data.dict(by_alias=True))
+    created = await collections["allergy"].find_one({"_id": result.inserted_id})
+    return APIResponse[Allergy](code=201, message="Allergy created successfully", data=Allergy(**created))
+
+
+@app.post("/condition", response_model=APIResponse[Condition])
+async def create_condition(
+    condition_data: Condition,
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can create conditions")
+
+    result = await collections["condition"].insert_one(condition_data.dict(by_alias=True))
+    created = await collections["condition"].find_one({"_id": result.inserted_id})
+    return APIResponse[Condition](code=201, message="Condition created successfully", data=Condition(**created))
+
+
+@app.post("/surgery", response_model=APIResponse[Surgery])
+async def create_surgery(
+    surgery_data: Surgery,
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can create surgeries")
+
+    result = await collections["surgery"].insert_one(surgery_data.dict(by_alias=True))
+    created = await collections["surgery"].find_one({"_id": result.inserted_id})
+    return APIResponse[Surgery](code=201, message="Surgery created successfully", data=Surgery(**created))
+
+
+@app.post("/medicine", response_model=APIResponse[Medicine])
+async def create_medicine(
+    medicine_data: Medicine,
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can create medicines")
+
+    result = await collections["medicine"].insert_one(medicine_data.dict(by_alias=True))
+    created = await collections["medicine"].find_one({"_id": result.inserted_id})
+    return APIResponse[Medicine](code=201, message="Medicine created successfully", data=Medicine(**created))
+
+@app.get("/allergy", response_model=APIResponse[List[Allergy]])
+async def list_allergies(current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    cursor = collections["allergy"].find()
+    allergies: List[Allergy] = []
+    async for doc in cursor:
+        allergies.append(Allergy(**doc))
+
+    return APIResponse[List[Allergy]](
+        code=200, message="Allergies retrieved successfully", data=allergies
+    )
+
+
+@app.get("/condition", response_model=APIResponse[List[Condition]])
+async def list_conditions(current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    cursor = collections["condition"].find()
+    conditions: List[Condition] = []
+    async for doc in cursor:
+        conditions.append(Condition(**doc))
+
+    return APIResponse[List[Condition]](
+        code=200, message="Conditions retrieved successfully", data=conditions
+    )
+
+
+@app.get("/surgery", response_model=APIResponse[List[Surgery]])
+async def list_surgeries(current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    cursor = collections["surgery"].find()
+    surgeries: List[Surgery] = []
+    async for doc in cursor:
+        surgeries.append(Surgery(**doc))
+
+    return APIResponse[List[Surgery]](
+        code=200, message="Surgeries retrieved successfully", data=surgeries
+    )
+
+
+@app.get("/medicine", response_model=APIResponse[List[Medicine]])
+async def list_medicines(current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    cursor = collections["medicine"].find()
+    medicines: List[Medicine] = []
+    async for doc in cursor:
+        medicines.append(Medicine(**doc))
+
+    return APIResponse[List[Medicine]](
+        code=200, message="Medicines retrieved successfully", data=medicines
+    )
+
+
+@app.get("/allergy/{uuid}", response_model=APIResponse[Allergy])
+async def get_allergy(uuid: str, current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doc = await collections["allergy"].find_one({"uuid": uuid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Allergy not found")
+
+    return APIResponse[Allergy](
+        code=200, message="Allergy retrieved successfully", data=Allergy(**doc)
+    )
+
+
+@app.get("/condition/{uuid}", response_model=APIResponse[Condition])
+async def get_condition(uuid: str, current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doc = await collections["condition"].find_one({"uuid": uuid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Condition not found")
+
+    return APIResponse[Condition](
+        code=200, message="Condition retrieved successfully", data=Condition(**doc)
+    )
+
+
+@app.get("/surgery/{uuid}", response_model=APIResponse[Surgery])
+async def get_surgery(uuid: str, current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doc = await collections["surgery"].find_one({"uuid": uuid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Surgery not found")
+
+    return APIResponse[Surgery](
+        code=200, message="Surgery retrieved successfully", data=Surgery(**doc)
+    )
+
+
+@app.get("/medicine/{uuid}", response_model=APIResponse[Medicine])
+async def get_medicine(uuid: str, current_user: Person = Depends(get_current_user)):
+    if current_user.role not in [RoleEnum.DOCTOR, RoleEnum.ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doc = await collections["medicine"].find_one({"uuid": uuid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Medicine not found")
+
+    return APIResponse[Medicine](
+        code=200, message="Medicine retrieved successfully", data=Medicine(**doc)
+    )
+
+
+@app.post(
+    "/doctor/prescribe-medicine/{patient_uuid}",
+    response_model=APIResponse[Medication]
+)
+async def prescribe_medication(
+    patient_uuid: str,
+    medication_data: Medication = Body(...),
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can prescribe medication")
+
+    patient_doc = await collections["persons"].find_one(
+        {"uuid": patient_uuid, "role": RoleEnum.PATIENT}
+    )
+    if not patient_doc:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    medicine_doc = await collections["medicine"].find_one({"uuid": medication_data.medicine_id})
+    if not medicine_doc:
+        raise HTTPException(status_code=404, detail="Medicine not found")
+    medical_history = await collections["medical_history"].find_one(
+        {"patient_id": patient_uuid}
+    )
+    if not medical_history:
+        raise HTTPException(status_code=404, detail="Medical history not found")
+
+    new_medication = Medication(
+        medicine_id=medication_data.medicine_id,
+        medical_history_id=medical_history["uuid"],
+        dosage=medication_data.dosage,
+        starting_date=medication_data.starting_date,
+        ending_date=medication_data.ending_date,
+        prescribing_doctor_id=current_user.uuid,
+    )
+
+    await collections["medication"].insert_one(new_medication.dict(by_alias=True))
+
+    return APIResponse[Medication](
+        code=201,
+        message="Medication prescribed successfully",
+        data=new_medication
+    )
+
+@app.post(
+    "/doctor/record-surgery/{patient_uuid}",
+    response_model=APIResponse[PastSurgery]
+)
+async def record_surgery(
+    patient_uuid: str,
+    surgery_data: PastSurgery = Body(...),
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can record surgeries")
+
+    patient_doc = await collections["persons"].find_one(
+        {"uuid": patient_uuid, "role": RoleEnum.PATIENT}
+    )
+    if not patient_doc:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    # Check if surgery exists
+    surgery_doc = await collections["surgery"].find_one({"uuid": surgery_data.surgery_id})
+    if not surgery_doc:
+        raise HTTPException(status_code=404, detail="Surgery not found")
+
+    medical_history = await collections["medical_history"].find_one(
+        {"patient_id": patient_uuid}
+    )
+    if not medical_history:
+        raise HTTPException(status_code=404, detail="Medical history not found")
+
+    new_surgery = PastSurgery(
+        surgery_id=surgery_data.surgery_id,
+        medical_history_id=medical_history["uuid"],
+        date=surgery_data.date,
+        surgeon_id=current_user.uuid,
+        complications=surgery_data.complications,
+        notes=surgery_data.notes,
+        outcome=surgery_data.outcome
+    )
+
+    await collections["past_surgery"].insert_one(new_surgery.dict(by_alias=True))
+
+    return APIResponse[PastSurgery](
+        code=201,
+        message="Surgery recorded successfully",
+        data=new_surgery
+    )
+
+@app.post(
+    "/doctor/diagnose-condition/{patient_uuid}",
+    response_model=APIResponse[ConditionDiagnosis]
+)
+async def diagnose_condition(
+    patient_uuid: str,
+    diagnosis_data: ConditionDiagnosis = Body(...),
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can diagnose conditions")
+
+    patient_doc = await collections["persons"].find_one(
+        {"uuid": patient_uuid, "role": RoleEnum.PATIENT}
+    )
+    if not patient_doc:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    
+    condition_doc = await collections["condition"].find_one({"uuid": diagnosis_data.condition_id})
+    if not condition_doc:
+        raise HTTPException(status_code=404, detail="Condition not found")
+
+    medical_history = await collections["medical_history"].find_one(
+        {"patient_id": patient_uuid}
+    )
+    if not medical_history:
+        raise HTTPException(status_code=404, detail="Medical history not found")
+
+    new_condition = ConditionDiagnosis(
+        condition_id=diagnosis_data.condition_id,
+        medical_history_id=medical_history["uuid"],
+        severity=diagnosis_data.severity,
+        diagnosing_doctor_id=current_user.uuid,
+        diagnosis_date=diagnosis_data.diagnosis_date,
+        triggers=diagnosis_data.triggers
+    )
+
+    await collections["condition_diagnosis"].insert_one(new_condition.dict(by_alias=True))
+
+    return APIResponse[ConditionDiagnosis](
+        code=201,
+        message="Condition diagnosed successfully",
+        data=new_condition
+    )
+
+@app.post(
+    "/doctor/diagnose-allergy/{patient_uuid}",
+    response_model=APIResponse[AllergyDiagnosis]
+)
+async def diagnose_allergy(
+    patient_uuid: str,
+    diagnosis_data: AllergyDiagnosis = Body(...),
+    current_user: Person = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.DOCTOR:
+        raise HTTPException(status_code=403, detail="Only doctors can diagnose allergies")
+
+    patient_doc = await collections["persons"].find_one(
+        {"uuid": patient_uuid, "role": RoleEnum.PATIENT}
+    )
+    if not patient_doc:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    # Check if allergy exists
+    allergy_doc = await collections["allergy"].find_one({"uuid": diagnosis_data.allergy_id})
+    if not allergy_doc:
+        raise HTTPException(status_code=404, detail="Allergy not found")
+
+    medical_history = await collections["medical_history"].find_one(
+        {"patient_id": patient_uuid}
+    )
+    if not medical_history:
+        raise HTTPException(status_code=404, detail="Medical history not found")
+
+    new_allergy = AllergyDiagnosis(
+        allergy_id=diagnosis_data.allergy_id,
+        medical_history_id=medical_history["uuid"],
+        severity=diagnosis_data.severity,
+        diagnosing_doctor_id=current_user.uuid,
+        diagnosis_date=diagnosis_data.diagnosis_date
+    )
+
+    await collections["allergy_diagnosis"].insert_one(new_allergy.dict(by_alias=True))
+
+    return APIResponse[AllergyDiagnosis](
+        code=201,
+        message="Allergy diagnosed successfully",
+        data=new_allergy
+    )

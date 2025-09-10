@@ -1,7 +1,9 @@
 from typing import Generic, TypeVar, List, Optional, Any
-from datetime import datetime
+from datetime import datetime, date
 from bson import ObjectId
 from pydantic import BaseModel, Field, EmailStr
+from enum import Enum
+import uuid
 
 class PyObjectId(ObjectId):
     @classmethod
@@ -23,125 +25,143 @@ class MongoBaseModel(BaseModel):
     class Config:
         allow_population_by_field_name = True
         arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str, datetime: lambda v: v.isoformat()}
+        json_encoders = {
+            ObjectId: str,
+            datetime: lambda v: v.isoformat(),
+            date: lambda v: v.isoformat(),  # for JSON responses
+        }
+
+    def dict(self, *args, **kwargs):
+        data = super().dict(*args, **kwargs)
+        for key, value in data.items():
+            if isinstance(value, date) and not isinstance(value, datetime):
+                data[key] = datetime.combine(value, datetime.min.time())
+        return data
 
 class ContactDetails(MongoBaseModel):
     email: EmailStr
     phone_num: str
     address: str
 
-from datetime import date
+class RoleEnum(str, Enum):
+    PATIENT = "patient"
+    DOCTOR = "doctor"
+    ADMIN = "admin"
+    RECEPTIONIST = "receptionist"
 
-class Admin(MongoBaseModel):
+class Person(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     gender: str
-    DOB: date   # <- FIXED
+    DOB: date
     contact_details: ContactDetails
     username: str
     password: str
-    type: str = "Admin"
-
-class Doctor(MongoBaseModel):
-    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    gender: str
-    DOB: date   # <- FIXED
-    contact_details: ContactDetails
-    specialization: str
-    working_hours: str
-    type: str = "Doctor"
-
-class Patient(MongoBaseModel):
-    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    gender: str
-    DOB: date   # <- FIXED
-    contact_details: ContactDetails
-    blood_group: str
-    emergency_contact: str
-    type: str = "Patient"
-
-
+    specialization: Optional[str]
+    working_hours: Optional[str]
+    blood_group: Optional[str]
+    emergency_contact: Optional[str]
+    role: RoleEnum 
 class Medicine(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    strength: str
-    manufacturer: str
-    manufacturing_date: datetime
-    expiry_date: datetime
-    quantity: int
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: Optional[str] = None
+    strength: Optional[str] = None
+    manufacturer: Optional[str] = None
+    manufacturing_date: Optional[datetime] = None
+    expiry_date: Optional[datetime] = None
+
 
 class Medication(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    medicine_id: PyObjectId
-    medical_history_id: PyObjectId
-    dosage: str
-    starting_date: datetime
-    ending_date: datetime
-    prescribing_doctor_id: PyObjectId
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    medicine_id: Optional[str] = None
+    medical_history_id: Optional[str] = None
+    dosage: Optional[str] = None
+    starting_date: Optional[datetime] = None
+    ending_date: Optional[datetime] = None
+    prescribing_doctor_id: Optional[str] = None
+
 
 class Allergy(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    type: str
-    allergen: str
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: Optional[str] = None
+    type: Optional[str] = None
+    allergen: Optional[str] = None
+
 
 class AllergyDiagnosis(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    medical_history_id: PyObjectId
-    allergy_id: PyObjectId
-    severity: str
-    diagnosing_doctor_id: PyObjectId
-    diagnosis_date: datetime
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    medical_history_id: Optional[str] = None
+    allergy_id: Optional[str] = None
+    severity: Optional[str] = None
+    diagnosing_doctor_id: Optional[str] = None
+    diagnosis_date: Optional[datetime] = None
+
 
 class Condition(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    type: str
-    description: str
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: Optional[str] = None
+    type: Optional[str] = None
+    description: Optional[str] = None
+
 
 class ConditionDiagnosis(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    medical_history_id: PyObjectId
-    condition_id: PyObjectId
-    severity: str
-    diagnosing_doctor_id: PyObjectId
-    diagnosis_date: datetime
-    triggers: Optional[str]
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    medical_history_id: Optional[str] = None
+    condition_id: Optional[str] = None
+    severity: Optional[str] = None
+    diagnosing_doctor_id: Optional[str] = None
+    diagnosis_date: Optional[datetime] = None
+    triggers: Optional[str] = None
+
 
 class Surgery(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    name: str
-    category: str
-    possible_risks: List[str]
-    body_part: str
-    description: str
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: Optional[str] = None
+    category: Optional[str] = None
+    possible_risks: Optional[List[str]] = None
+    body_part: Optional[str] = None
+    description: Optional[str] = None
+
 
 class PastSurgery(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    medical_history_id: PyObjectId
-    surgery_id: PyObjectId
-    date: datetime
-    surgeon_id: PyObjectId
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    medical_history_id: Optional[str] = None
+    surgery_id: Optional[str] = None
+    date: Optional[datetime] = None
+    surgeon_id: Optional[str] = None
     complications: Optional[List[str]] = []
     notes: Optional[str] = None
-    outcome: str
+    outcome: Optional[str] = None
+
 
 class MedicalHistory(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    patient_id: PyObjectId
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    patient_id: Optional[str] = None
+
 
 class Insurance(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
-    patient_id: PyObjectId
-    annual_limit: float
-    start_date: datetime
-    end_date: datetime
-    type: str
-    hospitalization_coverage: float
-    medicine_coverage: float
-    provider_name: str
+    uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
+    patient_id: Optional[str] = None
+    annual_limit: Optional[float] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    type: Optional[str] = None
+    hospitalization_coverage: Optional[float] = None
+    medicine_coverage: Optional[float] = None
+    provider_name: Optional[str] = None
+
+
 
 T = TypeVar("T")
 
@@ -163,20 +183,10 @@ class GetModel(Generic[T], MongoBaseModel):
 class DeleteModel(MongoBaseModel):
     id: PyObjectId
 
-DoctorCreate = CreateModel[Doctor]
-DoctorUpdate = UpdateModel[Doctor]
-DoctorGet = GetModel[Doctor]
-DoctorDelete = DeleteModel
-
-PatientCreate = CreateModel[Patient]
-PatientUpdate = UpdateModel[Patient]
-PatientGet = GetModel[Patient]
-PatientDelete = DeleteModel
-
-AdminCreate = CreateModel[Admin]
-AdminUpdate = UpdateModel[Admin]
-AdminGet = GetModel[Admin]
-AdminDelete = DeleteModel
+PersonCreate = CreateModel[Person]
+PersonUpdate = UpdateModel[Person]
+PersonGet = GetModel[Person]
+PersonDelete = DeleteModel
 
 MedicineCreate = CreateModel[Medicine]
 MedicineUpdate = UpdateModel[Medicine]
