@@ -1,7 +1,7 @@
 from typing import Generic, TypeVar, List, Optional, Any
 from datetime import datetime, date
 from bson import ObjectId
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, validator
 from enum import Enum
 import uuid
 
@@ -39,9 +39,9 @@ class MongoBaseModel(BaseModel):
         return data
 
 class ContactDetails(MongoBaseModel):
-    email: EmailStr
-    phone_num: str
-    address: str
+    email: Optional[EmailStr]
+    phone_num: Optional[str]
+    address: Optional[str]
 
 class RoleEnum(str, Enum):
     PATIENT = "patient"
@@ -52,17 +52,23 @@ class RoleEnum(str, Enum):
 class Person(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    gender: str
-    DOB: date
-    contact_details: ContactDetails
-    username: str
-    password: str
+    name: Optional[str]
+    gender: Optional[str]
+    DOB: Optional[datetime]
+    contact_details: Optional[ContactDetails]
+    username: Optional[str]
+    password: Optional[str]
     specialization: Optional[str]
     working_hours: Optional[str]
     blood_group: Optional[str]
     emergency_contact: Optional[str]
-    role: RoleEnum 
+    role: Optional[RoleEnum]
+
+    @validator("role", pre=True)
+    def normalize_role(cls, v):
+        if isinstance(v, str):
+            return RoleEnum(v.lower())  # convert "receptionist" → RoleEnum.RECEPTIONIST
+        return v
 class Medicine(MongoBaseModel):
     id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
     uuid: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()))
